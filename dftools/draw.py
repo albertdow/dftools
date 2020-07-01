@@ -170,6 +170,7 @@ def mc(
             "color": color, "ec": color,
             "label": proc_kw.get("labels", {}).get(proc, proc),
             "ls": proc_kw.get("linestyles", {}).get(proc, "-"),
+            "zorder": proc_kw.get("zorder", {}).get(proc, 1),
         }
         kwargs.update(mc_kw)
         if stacked:
@@ -204,7 +205,7 @@ def data_mc(
     mcstat_top=False, mcstat=True, add_ratios=True, show_zeros=False,
     mc_kw={}, sig_kw={}, mcstat_kw={}, sm_kw={}, data_kw={}, proc_kw={},
     legend_kw={}, cms_kw={}, interval_func=poisson_interval_with_checks,
-    ratio_legend_kw={}, mcstat_ratio_kw={}, variable_bin=False,
+    ratio_legend_kw={}, mcstat_ratio_kw={}, variable_bin=False, difference=False,
 ):
     _df_data = df_data.copy(deep=True)
     _df_mc = df_mc.copy(deep=True)
@@ -313,6 +314,42 @@ def data_mc(
             kwargs.update(legend_kw)
             legend_data_mc(
                 ax, _df_data, _df_mc, label, add_ratios=add_ratios,
+                offaxis=offaxis, legend_kw=kwargs, 
+                ratio_legend_kw=ratio_legend_kw,
+            )
+
+    if difference:
+        # just in case ratio was used as well, clear axis
+        ax[1].clear()
+        # SM total diff - bottom panel
+        df_mc_sum_diff = df_mc_sum.copy()
+        # set bin entries to zero, keep variances the same
+        df_mc_sum_diff.loc[:,"sum_w"] = 0.
+
+        mc_kw_ = dict(label="", histtype='step')
+        mc_kw_.update(sm_kw)
+        mcstat_kw_ = dict(label="MC stat. unc.", color="black", alpha=0.2)
+        mcstat_kw_.update(mcstat_ratio_kw)
+
+        mc(
+            ax[1], df_mc_sum_diff, label, bins, variable_bin, mcstat=mcstat, mc_kw=mc_kw_,
+            mcstat_kw=mcstat_kw_, proc_kw=proc_kw, interval_func=interval_func,
+        )
+
+        # Data diff - bottom panel
+        if not blind:
+            kwargs = dict(data_kw)
+            kwargs["label"] = ""
+            df_data_diff = _df_data.copy()
+            df_data_diff.loc[:,"sum_w"] = _df_data["sum_w"]-df_mc_sum["sum_w"].values
+            data(ax[1], df_data_diff, label, bins, variable_bin, data_kw=kwargs)
+
+        if legend:
+            offaxis = legend_kw.pop("offaxis", True)
+            kwargs = dict(labelspacing=0.05)
+            kwargs.update(legend_kw)
+            legend_data_mc(
+                ax, _df_data, _df_mc, label, add_ratios=False,
                 offaxis=offaxis, legend_kw=kwargs, 
                 ratio_legend_kw=ratio_legend_kw,
             )
@@ -533,8 +570,10 @@ def impacts(data, fig=None, ax=None, converter=nuisance_names):
 
     y = data["param_value"].values
     yerr = (
-        -1*data["param_merrdown"].values,
-        data["param_merrup"].values,
+        # -1*data["param_merrdown"].values,
+        # data["param_merrup"].values,
+        data.eval("param_value-param_merrdown").values,
+        data.eval("param_merrup-param_value").values,
     )
     ax[0].errorbar(
         y, (x[:-1]+x[1:])/2., xerr=yerr,
