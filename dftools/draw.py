@@ -2,6 +2,7 @@ import functools
 import numpy as np
 import pandas as pd
 import matplotlib as mpl
+import matplotlib.lines as mlines
 import matplotlib.transforms as transforms
 import matplotlib.pyplot as plt
 import scipy.interpolate as interp
@@ -12,12 +13,16 @@ __all__ = [
     "cms_label", "legend_data_mc", "data_mc", "data", "mc", "heatmap",
     "annotate_heatmap",
     "process_names", "process_colours",
-    "impacts", "nllscan",
+    "impacts", "nllscan", "pulls",
 ]
 
 def cms_label(ax, label, lumi=35.9, energy=13, extra_label=""):
+    #ax.text(
+    #    0, 1, r'$\mathbf{CMS}\ \mathit{'+label+'}$',
+    #    ha='left', va='bottom', transform=ax.transAxes,
+    #)
     ax.text(
-        0, 1, r'$\mathbf{CMS}\ \mathit{'+label+'}$',
+        0, 1, label,
         ha='left', va='bottom', transform=ax.transAxes,
     )
     ax.text(
@@ -35,6 +40,21 @@ def legend_data_mc(
     ratio_legend_kw={},
 ):
     handles, labels = ax[0].get_legend_handles_labels()
+
+    # temporary changes for PAS plots
+    # change signal boxes to lines, first two entries (added at the end)
+    # sig_colours = [handles[0].get_edgecolor(), handles[1].get_edgecolor()]
+    # first_line = mlines.Line2D(
+    #         [], [], color=sig_colours[0],
+    #         # [], [], color='blue',
+    # )
+    # second_line = mlines.Line2D(
+    #         [], [], color=sig_colours[1],
+    #         # [], [], color='red',
+    # )
+    # handles[0] = first_line
+    # handles[1] = second_line
+    #####
 
     if add_ratios:
         # sort by process total
@@ -125,6 +145,34 @@ def data(ax, df, label, bins, variable_bin=False, data_kw={},):
         **kwargs,
     )
 
+def data_diff(ax, df, _df, df_diff, label, bins, variable_bin=False, data_kw={},):
+    # function for the data-bkg difference, as opposed to ratio
+    # only testing atm
+    if not variable_bin:
+        bin_edges, bin_cents = bin_lows_to_edges_cents(bins)
+    else:
+        bin_edges, bin_cents = bin_full_to_edges_cents(bins)
+
+    # draw
+    kwargs = dict(fmt='o', lw=1, color='black', label='Data')
+    kwargs.update(data_kw)
+
+    mask = (_df["sum_ww"]==0.)
+    neff = _df["sum_w"]**2 / _df["sum_ww"]
+    neff[mask] = 0.
+
+    scale = _df["sum_w"]/neff
+    scale[mask] = 1.
+
+    down, up = poisson_interval(neff, scale=scale)
+    # shift using df_diff
+    down = (down - df_diff["sum_w"].values)/np.sqrt(df_diff["sum_ww"].values)
+    up = (up - df_diff["sum_w"].values)/np.sqrt(df_diff["sum_ww"].values)
+    ax.errorbar(
+        bin_cents, df["sum_w"], yerr=[df["sum_w"]-down, up-df["sum_w"]],
+        **kwargs,
+    )
+
 def poisson_interval_with_checks(x, variance):
     down, up = poisson_interval(x**2/variance, scale=variance/x)
     mask = (variance==0.)
@@ -151,6 +199,10 @@ def mc(
     # sort by process total
     if sort_by_process:
         tdf_procsum = tdf.sum(axis=0)
+        # print(tdf_procsum)
+        # TEMPORARY
+        # artificially make bestfit_stack sum large to place on top
+        # tdf_procsum[0] = 1e8
         tdf = tdf[tdf_procsum.sort_values().index]
 
     # mc
@@ -320,10 +372,18 @@ def data_mc(
 
     if difference:
         # just in case ratio was used as well, clear axis
-        ax[1].clear()
         # SM total diff - bottom panel
-        df_mc_sum_diff = df_mc_sum.copy()
-        # set bin entries to zero, keep variances the same
+        # don't use Bestfit_stack in bkg sum
+        bestfit_mask = df_mc_sm.index.get_level_values("parent") != "Bestfit_stack"
+        _df_mc_sm = df_mc_sm.loc[bestfit_mask].copy(deep=True)
+        _df_mc_sum = _df_mc_sm.groupby(label).sum()
+        _df_mc_sum.loc[:,"parent"] = "SMTotal"
+        _df_mc_sum = _df_mc_sum.groupby(["parent", label]).sum()
+        df_mc_sum_diff = _df_mc_sum.copy(deep=True)
+        # set bin entries to zero, shift variances
+        df_mc_sum_diff.loc[:,"sum_ww"] = 1.
+        df_mc_sum_diff.loc[:,"sum_ww_up"] = 1.
+        df_mc_sum_diff.loc[:,"sum_ww_down"] = 1.
         df_mc_sum_diff.loc[:,"sum_w"] = 0.
 
         mc_kw_ = dict(label="", histtype='step')
@@ -332,7 +392,7 @@ def data_mc(
         mcstat_kw_.update(mcstat_ratio_kw)
 
         mc(
-            ax[1], df_mc_sum_diff, label, bins, variable_bin, mcstat=mcstat, mc_kw=mc_kw_,
+            ax[1], df_mc_sum_diff, label, bins, variable_bin, mcstat=False, mc_kw=mc_kw_,
             mcstat_kw=mcstat_kw_, proc_kw=proc_kw, interval_func=interval_func,
         )
 
@@ -340,9 +400,12 @@ def data_mc(
         if not blind:
             kwargs = dict(data_kw)
             kwargs["label"] = ""
-            df_data_diff = _df_data.copy()
-            df_data_diff.loc[:,"sum_w"] = _df_data["sum_w"]-df_mc_sum["sum_w"].values
-            data(ax[1], df_data_diff, label, bins, variable_bin, data_kw=kwargs)
+            df_data_diff = _df_data.copy(deep=True)
+            # shift sum_ww, subtract sum_w of MC
+            df_data_diff.loc[:,"sum_ww"] = df_data_diff["sum_ww"] - _df_mc_sum["sum_w"].values
+            df_data_diff.loc[:,"sum_w"] = (df_data_diff["sum_w"] - _df_mc_sum["sum_w"].values)/np.sqrt(_df_mc_sum["sum_ww"].values)
+            # data(ax[1], df_data_diff, label, bins, variable_bin, data_kw=kwargs)
+            data_diff(ax[1], df_data_diff, _df_data, _df_mc_sum, label, bins, variable_bin, data_kw=kwargs)
 
         if legend:
             offaxis = legend_kw.pop("offaxis", True)
@@ -572,8 +635,12 @@ def impacts(data, fig=None, ax=None, converter=nuisance_names):
     yerr = (
         # -1*data["param_merrdown"].values,
         # data["param_merrup"].values,
-        data.eval("param_value-param_merrdown").values,
+
+        abs(data.eval("param_value-param_merrdown").values),
         data.eval("param_merrup-param_value").values,
+
+        # data["param_merrdown"].values,
+        # data["param_merrup"].values,
     )
     ax[0].errorbar(
         y, (x[:-1]+x[1:])/2., xerr=yerr,
@@ -598,6 +665,47 @@ def impacts(data, fig=None, ax=None, converter=nuisance_names):
     ax[0].set_xlabel(r'$\theta$')
     ax[1].set_xlabel(r'$\Delta\hat{r}$')
     ax[1].legend(fancybox=True, edgecolor='#d9d9d9')
+    return fig, ax
+
+def pulls(data, fig=None, ax=None, converter=nuisance_names):
+    if fig is None:
+        fig = plt.figure(figsize=(4,4), dpi=150)
+    if ax is None:
+        ax = fig.subplots(
+            ncols=1, nrows=1,
+            sharex=False, sharey=True,
+            gridspec_kw={"hspace": 0., "wspace": 0.},
+        )
+
+    ax.minorticks_off()
+
+    y = data["param_value"].values
+    x = np.linspace(0., len(y), len(y)+1)
+    yerr = (
+        data["param_merrdown"].values,
+        data["param_merrup"].values,
+    )
+    ax.errorbar(
+        y, (x[:-1]+x[1:])/2., xerr=yerr,
+        fmt='o', color='black',
+        ms=4, capsize=4,
+    )
+    xmax = data.eval("param_value+param_merrup").max()
+    xmax = max(xmax, data.eval("-(param_value+param_merrdown)").max())
+    xmax = int(xmax)+1
+    ax.set_xlim(-xmax, xmax)
+    for pos in range(xmax):
+        ax.axvline(pos, lw=1, color='gray', alpha=0.8)
+        ax.axvline(-pos, lw=1, color='gray', alpha=0.8)
+    ax.set_ylim(0, len(y))
+    ax.set_xticks(np.arange(-(xmax-1), (xmax-1)+0.1, 1.))
+    ax.set_yticks((x[:-1]+x[1:])/2.)
+    labels = [
+        converter.get(l, l.replace("_", "\\_"))
+        for l in data.index.get_level_values("param").values
+    ]
+    ax.set_yticklabels(labels)
+    ax.set_xlabel(r'$\theta$')
     return fig, ax
 
 def nllscan(
